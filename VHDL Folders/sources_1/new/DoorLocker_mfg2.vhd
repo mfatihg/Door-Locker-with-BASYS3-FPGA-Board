@@ -1,0 +1,341 @@
+library IEEE;
+use IEEE.STD_LOGIC_1164.ALL;
+use IEEE.STD_LOGIC_ARITH.ALL;
+use IEEE.STD_LOGIC_UNSIGNED.ALL;
+
+entity TopLevel is
+    Port (
+        clk : in STD_LOGIC;
+        reset : in STD_LOGIC;
+        sw : in STD_LOGIC_VECTOR (11 downto 0);
+        BTNR : in STD_LOGIC;
+        BTNL : in STD_LOGIC;
+        leds : out STD_LOGIC_VECTOR (11 downto 0);
+        wrong_pwd : out STD_LOGIC;
+        clk_div : out STD_LOGIC;
+        seg : out STD_LOGIC_VECTOR (6 downto 0);
+        digit : out STD_LOGIC_VECTOR (3 downto 0);
+        serial_out_dummy : out std_logic
+    );
+end TopLevel;
+
+architecture Structural of TopLevel is
+
+    signal clk_div1 : std_logic;
+    signal internal_serial_out : std_logic;
+    signal start_debounced, start_extended : std_logic;
+    signal enable_debounced, enable_extended : std_logic;
+    signal reset_debounced, reset_extended : std_logic;
+    signal start_synced : std_logic;
+    signal enable_synced : std_logic;
+    signal reset_synced : std_logic;
+    signal wrong_pwd_int : std_logic := '0';
+    signal reg_data_out_int :  STD_LOGIC_VECTOR (11 downto 0);
+    signal seven_segment_out_int :  STD_LOGIC_VECTOR (11 downto 0);
+    signal shift_enable_out_int :  STD_LOGIC;
+    signal state_out_int : STD_LOGIC_VECTOR (1 downto 0);
+    signal internal_leds : STD_LOGIC_VECTOR (11 downto 0);
+    signal correct_password : std_logic := '0';
+    signal nibble1, nibble2, nibble3 : STD_LOGIC_VECTOR(3 downto 0);
+    signal seg1, seg2, seg3 : STD_LOGIC_VECTOR(6 downto 0);
+    signal refresh_counter : unsigned(15 downto 0); -- Counter for multiplexing
+    signal display_mode : STD_LOGIC; -- 0 sayý icin, 1 mesaj icin
+    signal display_counter : unsigned(25 downto 0); -- counter toggle modu ýcýn
+    signal status_message : STD_LOGIC_VECTOR(1 downto 0); -- 00 for nothin  01 for ON 10 for OFF
+
+    -- 7-segment gosterim for "O", "N", "F"
+    constant SEG_O : STD_LOGIC_VECTOR(6 downto 0) := "1000000";
+    constant SEG_N : STD_LOGIC_VECTOR(6 downto 0) := "1001000";
+    constant SEG_F : STD_LOGIC_VECTOR(6 downto 0) := "0001110";
+
+    component ClkDiv
+        Port ( 
+            clk : in STD_LOGIC;
+            clk_div : out STD_LOGIC
+        );
+    end component;
+
+    component Register_data
+        Port ( 
+            clk : in STD_LOGIC;
+            reset : in STD_LOGIC;
+            data_in : in STD_LOGIC_VECTOR (11 downto 0);
+            enable : in STD_LOGIC;
+            start : in STD_LOGIC;
+            serial_out : out STD_LOGIC;
+            reg_data_out : out STD_LOGIC_VECTOR (11 downto 0);
+            shift_enable_out : out STD_LOGIC;
+            wrong_pwd_reg : in STD_LOGIC;
+            seven_segment_out : out STD_LOGIC_VECTOR (11 downto 0)
+
+        );
+    end component;
+
+    component SM
+        Port ( 
+            clk : in STD_LOGIC;
+            reset : in STD_LOGIC;
+            serial_in : in STD_LOGIC;
+            start : in STD_LOGIC;
+            leds : out STD_LOGIC_VECTOR (11 downto 0);
+            wrong_pwd : out STD_LOGIC;
+            state_out : out STD_LOGIC_VECTOR (1 downto 0)
+        );
+    end component;
+
+    component debouncer
+        Port (
+            clk : in STD_LOGIC;
+            btn : in STD_LOGIC;
+            btn_clr : out STD_LOGIC
+        );
+    end component;
+
+    component pulse_extender
+        Port (
+            clk : in STD_LOGIC;
+            pulse_in : in STD_LOGIC;
+            pulse_out : out STD_LOGIC
+        );
+    end component;
+
+    component SevenSegmentDecoder
+        Port (
+            bin_in : in STD_LOGIC_VECTOR(3 downto 0);
+            seg_out : out STD_LOGIC_VECTOR (6 downto 0)
+        );
+    end component;
+
+begin
+
+--clk divider
+    clk_div_inst: ClkDiv
+        Port map (
+            clk => clk,
+            clk_div => clk_div1
+        );
+
+-- debaounce devreleri
+    debounce_start: debouncer
+        Port map (
+            clk => clk, 
+            btn => BTNL,
+            btn_clr => start_debounced
+        );
+
+    debounce_enable: debouncer
+        Port map (
+            clk => clk, 
+            btn => BTNR,
+            btn_clr => enable_debounced
+        );
+
+    debounce_reset: debouncer
+        Port map (
+            clk => clk, 
+            btn => reset,
+            btn_clr => reset_debounced
+        );
+
+    pulse_extender_start: pulse_extender
+        Port map (
+            clk => clk, 
+            pulse_in => start_debounced,
+            pulse_out => start_extended
+        );
+
+    pulse_extender_enable: pulse_extender
+        Port map (
+            clk => clk, 
+            pulse_in => enable_debounced,
+            pulse_out => enable_extended
+        );
+
+    pulse_extender_reset: pulse_extender
+        Port map (
+            clk => clk, 
+            pulse_in => reset_debounced,
+            pulse_out => reset_extended
+        );
+
+    
+    process (clk_div1)
+    begin
+        if rising_edge(clk_div1) then
+            start_synced <= start_extended;
+            enable_synced <= enable_extended;
+            reset_synced <= reset_extended;
+        end if;
+    end process;
+
+    
+    reg_inst: Register_data
+        Port map (
+            clk => clk_div1,
+            reset => reset_synced,
+            data_in => sw,
+            enable => enable_synced,
+            start => start_synced,
+            serial_out => internal_serial_out,
+            reg_data_out => reg_data_out_int,
+            shift_enable_out => shift_enable_out_int,
+            wrong_pwd_reg => wrong_pwd_int,
+            seven_segment_out => seven_segment_out_int
+        );
+
+
+    sm_inst: SM
+        Port map (
+            clk => clk_div1,
+            reset => reset_synced,
+            serial_in => internal_serial_out,
+            start => start_synced,
+            leds => internal_leds,
+            wrong_pwd => wrong_pwd_int,
+            state_out => state_out_int
+        );
+
+    clk_div <= clk_div1;
+    wrong_pwd <= wrong_pwd_int;
+
+    process (internal_leds)
+    begin
+        if internal_leds = "111111111111" then
+            correct_password <= '1';
+        else
+            correct_password <= '0';
+        end if;
+    end process;
+
+    process (internal_leds, clk_div1)
+    begin
+        if correct_password = '1' then
+            if clk_div1 = '1' then
+                leds <= (others => '1'); 
+            else
+                leds <= (others => '0'); 
+            end if;
+        else
+            leds <= internal_leds; 
+        end if;
+    end process;
+
+    
+    nibble1 <= seven_segment_out_int(3 downto 0);
+    nibble2 <= seven_segment_out_int(7 downto 4);
+    nibble3 <= seven_segment_out_int(11 downto 8);
+
+    
+    seg_decoder1: SevenSegmentDecoder
+        Port map (
+            bin_in => nibble1,
+            seg_out => seg1
+        );
+
+    seg_decoder2: SevenSegmentDecoder
+        Port map (
+            bin_in => nibble2,
+            seg_out => seg2
+        );
+
+    seg_decoder3: SevenSegmentDecoder
+        Port map (
+            bin_in => nibble3,
+            seg_out => seg3
+        );
+
+    process (clk)
+    begin
+        if rising_edge(clk) then
+            if reset = '1' then
+                refresh_counter <= (others => '0');
+            else
+                refresh_counter <= refresh_counter + 1;
+            end if;
+        end if;
+    end process;
+
+    process (clk)
+    begin
+        if rising_edge(clk) then
+            if reset = '1' then
+                display_counter <= (others => '0');
+                display_mode <= '0';
+            else
+                if display_counter = 50000000 then
+                    display_counter <= (others => '0');
+                    display_mode <= not display_mode;
+                else
+                    display_counter <= display_counter + 1;
+                end if;
+            end if;
+        end if;
+    end process;
+
+    process (internal_leds, wrong_pwd_int)
+    begin
+        if internal_leds = "111111111111" then
+            status_message <= "01"; -- ON
+        elsif wrong_pwd_int = '1' then
+            status_message <= "10"; -- OFF
+        else
+            status_message <= "00"; -- nothing
+        end if;
+    end process;
+
+    process (refresh_counter, display_mode, status_message)
+    begin
+        if status_message = "01" and display_mode = '1' then
+            case refresh_counter(15 downto 14) is
+                when "00" => 
+                    digit <= "1110"; 
+                    seg <= SEG_N; 
+                when "01" => 
+                    digit <= "1101"; 
+                    seg <= SEG_O; 
+                when "10" => 
+                    digit <= "1011"; 
+                    seg <= "1111111";
+                when others => 
+                    digit <= "1111"; 
+                    seg <= "1111111"; -- Blank display
+            end case;
+        elsif status_message = "10" and display_mode = '1' then
+            -- Display "OFF"
+            case refresh_counter(15 downto 14) is
+                when "00" => 
+                    digit <= "1110"; -- enable the first digit
+                    seg <= SEG_F; -- display "F"
+                when "01" => 
+                    digit <= "1101"; 
+                    seg <= SEG_F; 
+                when "10" => 
+                    digit <= "1011"; 
+                    seg <= SEG_O; 
+                when others => 
+                    digit <= "1111"; -- diable all digits
+                    seg <= "1111111"; -- blank display
+            end case;
+        else
+            --  the entered number goster
+            case refresh_counter(15 downto 14) is
+                when "00" => 
+                    digit <= "1110"; -- enable the first digit
+                    seg <= seg1; --  the first nibble goster
+                when "01" => 
+                    digit <= "1101"; 
+                    seg <= seg2; 
+                when "10" => 
+                    digit <= "1011"; 
+                    seg <= seg3; 
+                when others => 
+                    digit <= "1111"; 
+                    seg <= "1111111"; 
+            end case;
+        end if;
+    end process;
+
+
+
+serial_out_dummy <= internal_serial_out;                     
+end Structural;  
