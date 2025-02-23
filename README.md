@@ -1,1 +1,1 @@
-# Door-Locker-with-BASYS3-FPGA-Board
+# Door Locker with BASYS3 FPGA Board
